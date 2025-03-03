@@ -156,7 +156,7 @@ class FileHasher {
         [int]$chunkSizeMB = 64, 
         [int]$maxThreads = 0) {
         
-        $logger = [Logger]::new("C:\Users\malfi\PycharmProjects\MiniOnedrive\log.log")
+        $logger = [Logger]::new("C:\Users\malfi\PycharmProjects\MiniOnedrive\logs\FileHasherMgr.log")
         
         try {
             [FileHasher]::ValidateInputs($filePath, [ref]$algorithm, [ref]$maxThreads)
@@ -240,7 +240,7 @@ class FileHasher {
         [Logger]$logger) {
         
         $cancellationSource = $null
-        $logPath = Join-Path $PSScriptRoot -ChildPath "FileHasher.log"
+        $logPath = Join-Path $PSScriptRoot -ChildPath "logs\ChunksProcessor.log"
         
         try {
             $logger.Log("Starting parallel processing with $maxThreads threads", "INFO")

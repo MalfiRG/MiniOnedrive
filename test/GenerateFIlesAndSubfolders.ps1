@@ -24,9 +24,9 @@
 #>
 
 $basePath = "D:\"
-$maxDepth = 1
-$fileSizeMB = 1024
-$amount = 1
+$maxDepth = 2
+$fileSizeMB = 64
+$amount = 100
 $removeLast10Files = $false
 $quiet = $false
 $hashingAlgorithm = "MD5"

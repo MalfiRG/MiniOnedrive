@@ -13,8 +13,9 @@ param(
     [string]$ReplicaFolder = "D:\FilesReplica",
 
     [Parameter(Mandatory = $false)]
-    [string]$LogPath = (Join-Path -Path $PSScriptRoot -ChildPath "$($MyInvocation.MyCommand.Name).log")
+    [string]$LogPath = (Join-Path -Path $MyInvocation.MyCommand.Path -ChildPath "Logs\$($MyInvocation.MyCommand.Name).log")
 )
+
 
 class CheckpointManager {
     [string]$CheckpointPath
