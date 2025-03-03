@@ -50,12 +50,7 @@ MiniOneDrive operates in three main phases:
 
 ### Installation and Setup
 
-1. **Clone the Repository:**
-
-```sh
-git clone <https://github.com/yourusername/MiniOneDrive.git>
-```
-
+1. **Clone the Repository.**
 2. **Navigate to the Project Directory:**
 
 ```sh
