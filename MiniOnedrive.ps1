@@ -55,7 +55,7 @@ class CheckpointManager {
         try {
             $this.Logger.Log("Updating entry: $relativePath", "INFO")
             $this.CheckpointData[$relativePath] = @{
-                Hash       = $hash
+                Hash         = $hash
                 LastModified = $lastModified.ToString("o")
                 ACL          = $acl
             }
@@ -121,19 +121,19 @@ class FileValidator {
                 return $true
             } 
 
-            # Phase 4: Check timestamp
-            $sourceModified = $sourceFile.LastWriteTimeUtc
-            if ([datetime]$checkpointEntry.LastModified -ne [datetime]$sourceModified) {
-                $this.Logger.Log("Needs sync because timestamp mismatch: $relativePath", "INFO")
-                return $true
-            }
-
-            # Phase 5: Check ACL changes
+            # Phase 4: Check ACL changes
             $sourceAcl = (Get-Acl $sourceFile.FullName).AccessToString
             $replicaAcl = (Get-Acl $replicaPath).AccessToString
             if ($sourceAcl -ne $replicaAcl) { 
                 $this.Logger.Log("Needs sync because ACL mismatch: $relativePath", "INFO")
                 return $true 
+            }
+            
+            # Phase 5: Check timestamp 
+            $sourceModified = $sourceFile.LastWriteTimeUtc
+            if ([datetime]$checkpointEntry.LastModified -ne [datetime]$sourceModified) {
+                $this.Logger.Log("Needs sync because timestamp mismatch: $relativePath", "INFO")
+                return $true
             }
 
             # Phase 6: Check content hash 
