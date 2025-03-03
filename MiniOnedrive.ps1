@@ -13,7 +13,7 @@ param(
     [string]$ReplicaFolder = "D:\FilesReplica",
 
     [Parameter(Mandatory = $false)]
-    [string]$LogPath = (Join-Path -Path $MyInvocation.MyCommand.Path -ChildPath "Logs\$($MyInvocation.MyCommand.Name).log")
+    [string]$LogPath = (Join-Path -Path $PSScriptRoot -ChildPath "Logs\$($MyInvocation.MyCommand.Name).log")
 )
 
 
@@ -98,13 +98,31 @@ class FileValidator {
         try {
             $relativePath = [Path]::GetRelativePath($this.SourceRoot, $sourceFile.FullName)
             $replicaPath = Join-Path $this.ReplicaRoot $relativePath
+            $checkpointEntry = $this.CheckpointManager.CheckpointData[$relativePath]
+            $this.FileHashCache[$sourceFile.FullName] = $this.CheckpointManager.CheckpointData[$relativePath].SHA256
+            $replicaFileInfo = Get-Item $replicaPath -ErrorAction SilentlyContinue
+
+            # Phase 1: Check file existence
 
             if (-not (Test-Path $replicaPath)) {
                 $this.Logger.Log("Needs sync because replica does not exist: $relativePath", "INFO")
                 return $true 
             }
 
-            # Phase 1: Check ACL changes
+            # Phase 2: Check file size 
+            if ($sourceFile.Length -ne $replicaFileInfo.Length) {
+                $this.Logger.Log("Needs sync because file size mismatch: $relativePath", "INFO")
+                return $true
+            } 
+
+            # Phase 3: Check timestamp
+            $sourceModified = $sourceFile.LastWriteTimeUtc
+            if ([datetime]$checkpointEntry.LastModified -ne [datetime]$sourceModified) {
+                $this.Logger.Log("Needs sync because timestamp mismatch: $relativePath", "INFO")
+                return $true
+            }
+
+            # Phase 4: Check ACL changes
             $sourceAcl = (Get-Acl $sourceFile.FullName).AccessToString
             $replicaAcl = (Get-Acl $replicaPath).AccessToString
             if ($sourceAcl -ne $replicaAcl) { 
@@ -112,15 +130,11 @@ class FileValidator {
                 return $true 
             }
 
-            # Phase 2: Check timestamp
-            $checkpointEntry = $this.CheckpointManager.CheckpointData[$relativePath]
-            $sourceModified = $sourceFile.LastWriteTimeUtc
-            if ([datetime]$checkpointEntry.LastModified -ne [datetime]$sourceModified) {
-                $this.Logger.Log("Needs sync because timestamp mismatch: $relativePath", "INFO")
+            # Phase 5: Check content hash 
+            if ($replicaFileInfo.Length -ge 50000000) {
+                $this.Logger.Log("Needs sync because file is too large: $relativePath", "INFO")
                 return $true
             }
-
-            # Phase 3: Check content hash
             $this.FileHashCache[$sourceFile.FullName] = [FileHasher]::CalculateFileHashParallel($sourceFile.FullName, "SHA256", 64, 0)
             if ($this.FileHashCache[$sourceFile.FullName] -ne $checkpointEntry.SHA256) {
                 $this.Logger.Log("Needs sync because hash mismatch: $relativePath", "INFO")
@@ -183,6 +197,7 @@ class FileSynchronizer {
             $SourceACL = Get-Acl $sourcePath
             $replicaACL = Set-Acl -Path $replicaPath -AclObject $SourceACL -Passthru
             $this.CheckpointManager.UpdateFileEntry($relativePath, $hash, $fileInfo.LastWriteTimeUtc, $replicaACL.AccessToString)
+            $this.CheckpointManager.SaveCheckpoint()
             $this.Logger.Log("Synced file: $relativePath", "FILEUPDATE")
         }
         

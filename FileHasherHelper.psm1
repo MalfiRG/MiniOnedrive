@@ -52,11 +52,23 @@ function ProcessFileChunk {
             $fileStream.Dispose() 
         }
         $logger.Log("Processing $chunkId ID completed", "DEBUG")
+        if ($null -ne $logger) {
+            $logger.Log("Disposing logger instance for $chunkId ID", "DEBUG")
+            $logger.Dispose()
+        }
     }
 }
 
 class Logger {
     [string]$LogPath
+    static [hashtable]$LoggerInstances = @{}
+
+    static [Logger] GetInstance([string]$logPath) {
+        if (-not [Logger]::LoggerInstances.ContainsKey($logPath)) {
+            [Logger]::LoggerInstances[$logPath] = [Logger]::new($logPath)
+        }
+        return [Logger]::LoggerInstances[$logPath]
+    }
 
     Logger([string]$logPath) {
         $this.LogPath = $logPath
@@ -150,107 +162,129 @@ class Utilities {
 
 
 class FileHasher {
+    static [Logger] $LoggerFileHasherMgr
+
+    static FileHasher() {
+        $logPath = Join-Path $PSScriptRoot -ChildPath "logs\FileHasherMgr.log"
+        [FileHasher]::LoggerFileHasherMgr = [Logger]::GetInstance($logPath)
+    }
+
     static [string] CalculateFileHashParallel(
         [string]$filePath, 
         [string]$algorithm = "SHA256", 
         [int]$chunkSizeMB = 64, 
         [int]$maxThreads = 0) {
-        
-        $logger = [Logger]::new("C:\Users\malfi\PycharmProjects\MiniOnedrive\logs\FileHasherMgr.log")
-        
+
         try {
+            $logger = [FileHasher]::LoggerFileHasherMgr
+
             [FileHasher]::ValidateInputs($filePath, [ref]$algorithm, [ref]$maxThreads)
-            
+
             $fileInfo = [FileHasher]::PrepareFileInfo($filePath, $chunkSizeMB, [ref]$maxThreads)
-            
+
             $chunkDefinitions = [FileHasher]::CreateChunkDefinitions(
                 $fileInfo.ChunkSize, 
                 $fileInfo.TotalChunks, 
                 $fileInfo.FileSize)
-            
+
             $chunkResults = [FileHasher]::ProcessChunksInParallel(
                 $filePath, 
                 $algorithm, 
                 $chunkDefinitions, 
-                $maxThreads,
-                $logger)
-            
+                $maxThreads)
+
             $chunkHashes = [FileHasher]::CollectChunkResults($chunkResults, $fileInfo.TotalChunks)
-            
+
             $finalHash = [FileHasher]::CombineChunkHashes($chunkHashes, $algorithm, $fileInfo.TotalChunks)
-            $logger.Log("File hash $(algorithm): $finalHash", "INFO")
+            $logger.Log("File hash $($algorithm): $finalHash", "INFO")
             return $finalHash
         }
         catch {
-            [Utilities]::HandleError("CalculateFileHashParallel", $filePath, $_, $logger, $true)
+            [Utilities]::HandleError("CalculateFileHashParallel", $filePath, $_, [FileHasher]::LoggerFileHasherMgr, $true)
             return $null
         }
     }
-    
+
     static [void] ValidateInputs([string]$filePath, [ref]$algorithm, [ref]$maxThreads) {
+        $logger = [FileHasher]::LoggerFileHasherMgr
+
         if ($maxThreads.Value -le 0) {
+            $logger.Log("Invalid maximum number of threads. Setting to number of processor cores: $($maxThreads.Value)", "WARNING")
             $maxThreads.Value = [Environment]::ProcessorCount
         }
-        
+
         if (-not (Test-Path -Path $filePath -PathType Leaf)) {
+            [Utilities]::HandleError("ValidateInputs", "File not found", "File not found: $filePath", $logger, $true)
             throw "File not found: $filePath"
         }
-        
+
         $validAlgorithms = @("MD5", "SHA1", "SHA256", "SHA384", "SHA512")
         if ($validAlgorithms -notcontains $algorithm.Value) {
+            [Utilities]::HandleError("ValidateInputs", "Invalid hash algorithm", "Invalid hash algorithm: $($algorithm.Value)", $logger, $true)
             throw "Invalid hash algorithm. Supported algorithms: $($validAlgorithms -join ', ')"
         }
+        $logger.Log("Validated inputs: $filePath, $algorithm, $($maxThreads.Value)", "INFO")
     }
-    
+
     static [hashtable] PrepareFileInfo([string]$filePath, [int]$chunkSizeMB, [ref]$maxThreads) {
         $fileInfo = Get-Item $filePath
         $fileSize = $fileInfo.Length
         $chunkSize = $chunkSizeMB * 1MB
         $totalChunks = [math]::Ceiling($fileSize / $chunkSize)
-        
+        $logger = [FileHasher]::LoggerFileHasherMgr
+
         $maxThreads.Value = [Math]::Min($maxThreads.Value, $totalChunks)
-        
+        $logger.Log("File info: $filePath, $fileSize bytes, $chunkSizeMB MB chunk size, $totalChunks chunks", "INFO")
+
         return @{
             FileSize    = $fileSize
             ChunkSize   = $chunkSize
             TotalChunks = $totalChunks
         }
     }
-    
+
     static [array] CreateChunkDefinitions([long]$chunkSize, [int]$totalChunks, [long]$fileSize) {
+        $logger = [FileHasher]::LoggerFileHasherMgr
+
         return (0..($totalChunks - 1)) | ForEach-Object {
+            $logger.Log("Creating chunk definition $_", "DEBUG")
+
             $i = $_
             $startPosition = $i * $chunkSize
             $remainingBytes = $fileSize - $startPosition
             $currentChunkSize = [Math]::Min($chunkSize, $remainingBytes)
-            
+
             @{
                 ChunkIndex    = $i
                 StartPosition = $startPosition
                 ChunkSize     = $currentChunkSize
             }
+            $logger.Log("Chunk definition Index $_ created. Details: Start Index: $startPosition, Size: $currentChunkSize", "DEBUG")
         }
+        $logger.Log("All chunk definitions created", "INFO")
     }
-    
+
     static [array] ProcessChunksInParallel(
         [string]$filePath, 
         [string]$algorithm, 
         [array]$chunkDefinitions, 
-        [int]$maxThreads,
-        [Logger]$logger) {
+        [int]$maxThreads) {
         
+        $logger = [FileHasher]::LoggerFileHasherMgr
         $cancellationSource = $null
         $logPath = Join-Path $PSScriptRoot -ChildPath "logs\ChunksProcessor.log"
-        
+
         try {
             $logger.Log("Starting parallel processing with $maxThreads threads", "INFO")
             $cancellationSource = [System.Threading.CancellationTokenSource]::new()  
+            $logger.Log("Cancellation source created, value: $($cancellationSource.IsCancellationRequested)", "DEBUG")
+
             return $chunkDefinitions | ForEach-Object -ThrottleLimit $maxThreads -Parallel {
                 if ($using:cancellationSource.Token.IsCancellationRequested) {
                     return
                 }
                 Import-Module -Name .\FileHasherHelper.psm1 -Force
-                
+
                 ProcessFileChunk -chunkDef $_ -filePath $using:filePath -algorithm $using:algorithm -logPath $using:logPath
             } 
         } catch {
@@ -265,37 +299,56 @@ class FileHasher {
             }
         }
     }
-    
+
     static [hashtable] CollectChunkResults([array]$results, [int]$totalChunks) {
+        $logger = [FileHasher]::LoggerFileHasherMgr
         $chunkHashes = @{}
-        
+
         foreach ($result in $results) {
             $chunkHashes[$result.ChunkIndex] = $result.HashBytes
+            $logger.Log("Collected chunk hash: Chunk Index: $($result.ChunkIndex), Bytes: $($result.HashBytes.Length)", "DEBUG")
         }
-        
+
         if ($chunkHashes.Count -ne $totalChunks) {
+            [Utilities]::HandleError("CollectChunkResults", "Chunk hashes", "Some chunk hashes are missing. Expected $totalChunks, got $($chunkHashes.Count)", $logger, $true)
             throw "Some chunk hashes are missing. Expected $totalChunks, got $($chunkHashes.Count)"
         }
-        
+
+        ForEach-Object -InputObject $chunkHashes.Keys -Process {
+            $logger.Log("Collected chunk hash: Index: $_, Chunk length: $($chunkHashes[$_].Length), Chunk bytes: $($chunkHashes[$_])", "DEBUG")
+        }
+        $logger.Log("All chunk hashes collected", "INFO")
+
         return $chunkHashes
     }
-    
+
     static [string] CombineChunkHashes([hashtable]$chunkHashes, [string]$algorithm, [int]$totalChunks) {
+        $logger = [FileHasher]::LoggerFileHasherMgr
+
         $combinedBytes = [System.Collections.Generic.List[byte]]::new()
-        
+
         for ($i = 0; $i -lt $totalChunks; $i++) {
+            $logger.Log("Combining chunk hash $i", "DEBUG")
             $combinedBytes.AddRange($chunkHashes[$i])
+            $logger.Log("Combined chunk hash $i, $($combinedBytes.Count) bytes", "DEBUG")
         }
-        
+
         $finalHashAlgorithm = $null
-        
+
         try {
+            $logger.Log("Creating final hash algorithm instance: $algorithm", "DEBUG")
             $finalHashAlgorithm = [System.Security.Cryptography.HashAlgorithm]::Create($algorithm)
+            $logger.Log("Final hash algorithm instance created. ${algorithm}: Hash size: $($finalHashAlgorithm.HashSize)", "DEBUG")
             $finalHashBytes = $finalHashAlgorithm.ComputeHash($combinedBytes.ToArray())
+            $logger.Log("Final hash computed, algorithm: $algorithm, bytes: $($finalHashBytes.Length)", "INFO")
             return [BitConverter]::ToString($finalHashBytes).Replace("-", "").ToLower()
         }
         finally {
-            if ($null -ne $finalHashAlgorithm) { $finalHashAlgorithm.Dispose() }
+            if ($null -ne $finalHashAlgorithm) { 
+                $logger.Log("Disposing final hash algorithm instance", "INFO")
+                $finalHashAlgorithm.Dispose() 
+                $logger.Log("Final hash algorithm instance disposed", "INFO")
+            }
         }
     }
 }
