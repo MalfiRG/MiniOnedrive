@@ -3,12 +3,12 @@ using module .\Utils.psm1
 
 
 param(
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $true)]
     [ValidateScript({ Test-Path -Path $_ })]
-    [string]$SourceFolder = "D:\Files1",
+    [string]$SourceFolder,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReplicaFolder = "D:\FilesReplica",
+    [Parameter(Mandatory = $true)]
+    [string]$ReplicaFolder,
 
     [Parameter(Mandatory = $false)]
     [string]$LogPath = (Join-Path -Path $PSScriptRoot -ChildPath "Logs\$($MyInvocation.MyCommand.Name).log")
@@ -133,7 +133,7 @@ class FileValidator {
             $sourceModified = $sourceFile.LastWriteTimeUtc
             if ([datetime]$checkpointEntry.LastModified -ne [datetime]$sourceModified) {
                 $this.Logger.Log("Needs sync because timestamp mismatch: $relativePath", "INFO")
-                return $true
+                # return $true
             }
 
             # Phase 6: Check content hash 
