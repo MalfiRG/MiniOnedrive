@@ -1,7 +1,5 @@
 using namespace System.IO
-using namespace System.Collections.Generic
-using namespace System.Security.Cryptography
-using module .\FileHasherHelper.psm1
+using module .\Utils.psm1
 
 
 param(
@@ -57,7 +55,7 @@ class CheckpointManager {
         try {
             $this.Logger.Log("Updating entry: $relativePath", "INFO")
             $this.CheckpointData[$relativePath] = @{
-                SHA256       = $hash
+                Hash       = $hash
                 LastModified = $lastModified.ToString("o")
                 ACL          = $acl
             }
@@ -99,30 +97,38 @@ class FileValidator {
             $relativePath = [Path]::GetRelativePath($this.SourceRoot, $sourceFile.FullName)
             $replicaPath = Join-Path $this.ReplicaRoot $relativePath
             $checkpointEntry = $this.CheckpointManager.CheckpointData[$relativePath]
-            $this.FileHashCache[$sourceFile.FullName] = $this.CheckpointManager.CheckpointData[$relativePath].SHA256
-            $replicaFileInfo = Get-Item $replicaPath -ErrorAction SilentlyContinue
+            $this.FileHashCache[$sourceFile.FullName] = $this.CheckpointManager.CheckpointData[$relativePath].Hash
 
-            # Phase 1: Check file existence
+            #phase 1: Check if checkpoint entry exists
+            if (-not $checkpointEntry) {
+                $this.FileHashCache[$sourceFile.FullName] = (Get-FileHash -Path $sourceFile.FullName -Algorithm "md5").Hash
+                $this.Logger.Log("Needs sync because checkpoint entry does not exist: $relativePath", "INFO")
+                return $true
+            }
+            
+            # Phase 2: Check file existence
 
             if (-not (Test-Path $replicaPath)) {
+                $this.FileHashCache[$sourceFile.FullName] = (Get-FileHash -Path $sourceFile.FullName -Algorithm "md5").Hash
                 $this.Logger.Log("Needs sync because replica does not exist: $relativePath", "INFO")
                 return $true 
             }
 
-            # Phase 2: Check file size 
+            # Phase 3: Check file size 
+            $replicaFileInfo = Get-Item $replicaPath -ErrorAction SilentlyContinue
             if ($sourceFile.Length -ne $replicaFileInfo.Length) {
                 $this.Logger.Log("Needs sync because file size mismatch: $relativePath", "INFO")
                 return $true
             } 
 
-            # Phase 3: Check timestamp
+            # Phase 4: Check timestamp
             $sourceModified = $sourceFile.LastWriteTimeUtc
             if ([datetime]$checkpointEntry.LastModified -ne [datetime]$sourceModified) {
                 $this.Logger.Log("Needs sync because timestamp mismatch: $relativePath", "INFO")
                 return $true
             }
 
-            # Phase 4: Check ACL changes
+            # Phase 5: Check ACL changes
             $sourceAcl = (Get-Acl $sourceFile.FullName).AccessToString
             $replicaAcl = (Get-Acl $replicaPath).AccessToString
             if ($sourceAcl -ne $replicaAcl) { 
@@ -130,13 +136,9 @@ class FileValidator {
                 return $true 
             }
 
-            # Phase 5: Check content hash 
-            if ($replicaFileInfo.Length -ge 50000000) {
-                $this.Logger.Log("Needs sync because file is too large: $relativePath", "INFO")
-                return $true
-            }
-            $this.FileHashCache[$sourceFile.FullName] = [FileHasher]::CalculateFileHashParallel($sourceFile.FullName, "SHA256", 64, 0)
-            if ($this.FileHashCache[$sourceFile.FullName] -ne $checkpointEntry.SHA256) {
+            # Phase 6: Check content hash 
+            $this.FileHashCache[$sourceFile.FullName] = (Get-FileHash -Path $sourceFile.FullName -Algorithm "md5").Hash
+            if ($this.FileHashCache[$sourceFile.FullName] -ne $checkpointEntry.Hash) {
                 $this.Logger.Log("Needs sync because hash mismatch: $relativePath", "INFO")
                 return $true
             }
