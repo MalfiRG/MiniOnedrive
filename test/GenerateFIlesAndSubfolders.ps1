@@ -23,10 +23,10 @@
     GenerateFilesSubfolders.ps1 -BasePath "G:\" -MaxDepth 5 -FileSizeMB 1 -Amount 1000 -RemoveLast10Files $false -Quiet $false -HashingAlgorithm "SHA256"
 #>
 
-$basePath = "C:\"
-$maxDepth = 2
-$fileSizeMB = 1
-$amount = 500
+$basePath = "D:\"
+$maxDepth = 1
+$fileSizeMB = 1024
+$amount = 1
 $removeLast10Files = $false
 $quiet = $false
 $hashingAlgorithm = "MD5"

@@ -1,65 +1,80 @@
 using namespace System.IO
+using namespace System.Collections.Generic
+using namespace System.Security.Cryptography
+using module .\FileHasherHelper.psm1
+
 
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [ValidateScript({ Test-Path -Path $_ })]
-    [string]$SourceFolder,
+    [string]$SourceFolder = "D:\Files1",
 
-    [Parameter(Mandatory = $true)]
-    [string]$ReplicaFolder,
+    [Parameter(Mandatory = $false)]
+    [string]$ReplicaFolder = "D:\FilesReplica",
 
-    [Parameter(Mandatory = $true)]
-    [string]$LogPath
+    [Parameter(Mandatory = $false)]
+    [string]$LogPath = (Join-Path -Path $PSScriptRoot -ChildPath "$($MyInvocation.MyCommand.Name).log")
 )
-
-class Logger {
-    [string]$LogPath
-
-    Logger([string]$logPath) {
-        $this.LogPath = $logPath
-        if (-not (Test-Path $logPath)) {
-            New-Item -Path $logPath -Force | Out-Null
-        }
-    }
-
-    [void] Log([string]$message, [string]$action) {
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        $entry = "[$timestamp] [$action] $message"
-        Write-Host $entry
-        Add-Content -Path $this.LogPath -Value $entry
-    }
-}
 
 class CheckpointManager {
     [string]$CheckpointPath
     [hashtable]$CheckpointData = @{}
+    [Logger]$Logger
 
-    CheckpointManager([string]$replicaPath) {
+    CheckpointManager([string]$replicaPath, [Logger]$logger) {
+        $this.Logger = $logger
         $this.CheckpointPath = Join-Path $replicaPath ".synchashes"
         $this.LoadCheckpoint()
     }
 
     [void] LoadCheckpoint() {
-        if (Test-Path $this.CheckpointPath) {
-            $content = Get-Content $this.CheckpointPath -Raw
-            $this.CheckpointData = ConvertFrom-Json $content -AsHashtable
+        try {
+            if (Test-Path $this.CheckpointPath) {
+                $this.Logger.Log("Loading checkpoint", "INFO")
+                $content = Get-Content $this.CheckpointPath -Raw
+                $this.CheckpointData = ConvertFrom-Json $content -AsHashtable
+            }
+            $this.Logger.Log("Checkpoint loaded", "INFO")
+        } 
+        catch {
+            [Utilities]::HandleError("LoadCheckpoint", $this.CheckpointPath, $_, $this.Logger, $true)
         }
     }
 
     [void] SaveCheckpoint() {
-        $this.CheckpointData | ConvertTo-Json -Depth 5 | Set-Content $this.CheckpointPath
+        try {
+            $this.Logger.Log("Saving checkpoint", "INFO")
+            $this.CheckpointData | ConvertTo-Json -Depth 5 | Set-Content $this.CheckpointPath
+            $this.Logger.Log("Checkpoint saved", "INFO")
+        } 
+        catch {
+            [Utilities]::HandleError("SaveCheckpoint", $this.CheckpointPath, $_, $this.Logger, $true)
+        }
     }
 
     [void] UpdateFileEntry([string]$relativePath, [string]$hash, [datetime]$lastModified, [string]$acl) {
-        $this.CheckpointData[$relativePath] = @{
-            SHA256       = $hash
-            LastModified = $lastModified.ToString("o")
-            ACL          = $acl
+        try {
+            $this.Logger.Log("Updating entry: $relativePath", "INFO")
+            $this.CheckpointData[$relativePath] = @{
+                SHA256       = $hash
+                LastModified = $lastModified.ToString("o")
+                ACL          = $acl
+            }
+            $this.Logger.Log("Entry updated: $relativePath", "INFO")
+        }
+        catch {
+            [Utilities]::HandleError("UpdateFileEntry", $relativePath, $_, $this.Logger, $false)
         }
     }
 
     [void] RemoveFileEntry([string]$relativePath) {
-        $this.CheckpointData.Remove($relativePath)
+        try {
+            $this.Logger.Log("Removing entry: $relativePath", "INFO")
+            $this.CheckpointData.Remove($relativePath)
+        }
+        catch {
+            [Utilities]::HandleError("RemoveFileEntry", $relativePath, $_, $this.Logger, $false)
+        }
     }
 }
 
@@ -67,34 +82,59 @@ class FileValidator {
     [string]$SourceRoot
     [string]$ReplicaRoot
     [CheckpointManager]$CheckpointManager
+    [Logger]$Logger
+    [hashtable]$FileHashCache
 
-    FileValidator([string]$sourceRoot, [string]$replicaRoot, [CheckpointManager]$checkpointManager) {
+    FileValidator([string]$sourceRoot, [string]$replicaRoot, [CheckpointManager]$checkpointManager, [Logger]$logger) {
         $this.SourceRoot = $sourceRoot
         $this.ReplicaRoot = $replicaRoot
         $this.CheckpointManager = $checkpointManager
+        $this.Logger = $logger
+        $this.FileHashCache = @{}
     }
 
     [bool] NeedsSync([FileInfo]$sourceFile) {
-        $relativePath = [Path]::GetRelativePath($this.SourceRoot, $sourceFile.FullName)
-        $replicaPath = Join-Path $this.ReplicaRoot $relativePath
+        try {
+            $relativePath = [Path]::GetRelativePath($this.SourceRoot, $sourceFile.FullName)
+            $replicaPath = Join-Path $this.ReplicaRoot $relativePath
 
-        # Phase 1: Check ACL changes
-        if (-not (Test-Path $replicaPath)) { return $true }
-        $sourceAcl = (Get-Acl $sourceFile.FullName).AccessToString
-        $replicaAcl = (Get-Acl $replicaPath).AccessToString
-        if ($sourceAcl -ne $replicaAcl) { return $true }
+            if (-not (Test-Path $replicaPath)) {
+                $this.Logger.Log("Needs sync because replica does not exist: $relativePath", "INFO")
+                return $true 
+            }
 
-        # Phase 2: Check timestamp
-        $checkpointEntry = $this.CheckpointManager.CheckpointData[$relativePath]
-        $sourceModified = $sourceFile.LastWriteTimeUtc
-        if ([datetime]::Parse($checkpointEntry.LastModified) -ne $sourceModified) {
-            return $true
+            # Phase 1: Check ACL changes
+            $sourceAcl = (Get-Acl $sourceFile.FullName).AccessToString
+            $replicaAcl = (Get-Acl $replicaPath).AccessToString
+            if ($sourceAcl -ne $replicaAcl) { 
+                $this.Logger.Log("Needs sync because ACL mismatch: $relativePath", "INFO")
+                return $true 
+            }
+
+            # Phase 2: Check timestamp
+            $checkpointEntry = $this.CheckpointManager.CheckpointData[$relativePath]
+            $sourceModified = $sourceFile.LastWriteTimeUtc
+            if ([datetime]$checkpointEntry.LastModified -ne [datetime]$sourceModified) {
+                $this.Logger.Log("Needs sync because timestamp mismatch: $relativePath", "INFO")
+                return $true
+            }
+
+            # Phase 3: Check content hash
+            $this.FileHashCache[$sourceFile.FullName] = [FileHasher]::CalculateFileHashParallel($sourceFile.FullName, "SHA256", 64, 0)
+            if ($this.FileHashCache[$sourceFile.FullName] -ne $checkpointEntry.SHA256) {
+                $this.Logger.Log("Needs sync because hash mismatch: $relativePath", "INFO")
+                return $true
+            }
+
+            $this.Logger.Log("No sync needed: $relativePath", "INFO")
+            return $false
         }
-
-        # Phase 3: Check content hash
-        $currentHash = (Get-FileHash $sourceFile.FullName -Algorithm SHA256).Hash
-        return $currentHash -ne $checkpointEntry.SHA256
+        catch {
+            [Utilities]::HandleError("NeedsSync", $sourceFile.FullName, $_, $this.Logger, $false)
+            return $false
+        }
     }
+
 }
 
 class FileSynchronizer {
@@ -119,43 +159,38 @@ class FileSynchronizer {
     }
 
     [void] SyncFile([string]$sourcePath) {
-        $retryCount = 0
-        $maxRetries = 3
         $relativePath = [Path]::GetRelativePath($this.SourceRoot, $sourcePath)
         $replicaPath = Join-Path $this.ReplicaRoot $relativePath
-
-        while ($retryCount -lt $maxRetries) {
-            try {
-                $fileInfo = Get-Item $sourcePath
-                if (-not $this.Validator.NeedsSync($fileInfo)) { return }
-
-                # Ensure directory structure exists
-                $directory = Split-Path $replicaPath -Parent
-                if (-not (Test-Path $directory)) {
-                    New-Item -Path $directory -ItemType Directory -Force | Out-Null
-                    $this.Logger.Log("Created directory: $directory", "DIRCREATE")
-                }
-
-                # Copy with verification
-                Copy-Item $sourcePath $replicaPath -Force
-                if (-not (Test-Path $replicaPath)) {
-                    throw "File copy failed: $relativePath"
-                }
-
-                # Update checkpoint
-                $hash = (Get-FileHash $sourcePath -Algorithm SHA256).Hash
-                $acl = (Get-Acl $sourcePath).AccessToString
-                $this.CheckpointManager.UpdateFileEntry($relativePath, $hash, $fileInfo.LastWriteTimeUtc, $acl)
-                $this.Logger.Log("Synced file: $relativePath", "FILEUPDATE")
-                return
+        
+        $syncOperation = {
+            if (-not (Test-Path $sourcePath -ErrorAction Stop)) {
+                throw "Source file not found: $sourcePath"
             }
-            catch {
-                $retryCount++
-                $this.Logger.Log("Retry $retryCount for $relativePath - $_", "WARNING")
-                Start-Sleep -Seconds (2 * $retryCount)
+    
+            $fileInfo = Get-Item $sourcePath -ErrorAction Stop
+            if (-not $this.Validator.NeedsSync($fileInfo)) { return }
+    
+            $directory = Split-Path $replicaPath -Parent
+            if (-not (Test-Path $directory)) {
+                New-Item -Path $directory -ItemType Directory -Force | Out-Null
+                $this.Logger.Log("Created directory: $directory", "DIRCREATE")
             }
+    
+            Copy-Item $sourcePath $replicaPath -Force -ErrorAction Stop
+            
+            $hash = $this.Validator.FileHashCache[$sourcePath]
+            $SourceACL = Get-Acl $sourcePath
+            $replicaACL = Set-Acl -Path $replicaPath -AclObject $SourceACL -Passthru
+            $this.CheckpointManager.UpdateFileEntry($relativePath, $hash, $fileInfo.LastWriteTimeUtc, $replicaACL.AccessToString)
+            $this.Logger.Log("Synced file: $relativePath", "FILEUPDATE")
         }
-        $this.Logger.Log("Failed to sync: $relativePath", "ERROR")
+        
+        try {
+            [Utilities]::InvokeWithRetry($syncOperation, 3, 1, 2, "SyncFile: $relativePath", $this.Logger)
+        }
+        catch {
+            [Utilities]::HandleError("SyncFile", $relativePath, $_, $this.Logger, $false)
+        }
     }
 
     [void] DeleteOrphan([string]$replicaPath) {
@@ -168,22 +203,24 @@ class FileSynchronizer {
 
 class FolderSynchronizer {
     [FileSystemWatcher]$Watcher
+    [System.Collections.Generic.List[System.Management.Automation.PSEventJob]]$EventSubscriptions
     [FileSynchronizer]$Synchronizer
     [System.Timers.Timer]$DebounceTimer = [System.Timers.Timer]::new(500)
     [System.Collections.Generic.List[string]]$PendingChanges = [System.Collections.Generic.List[string]]::new()
+    [Logger]$Logger
 
     FolderSynchronizer(
         [string]$sourcePath,
         [string]$replicaPath,
         [string]$logPath
     ) {
-        $logger = [Logger]::new($logPath)
-        $checkpointManager = [CheckpointManager]::new($replicaPath)
-        $validator = [FileValidator]::new($sourcePath, $replicaPath, $checkpointManager)
+        $this.logger = [Logger]::new($logPath)
+        $checkpointManager = [CheckpointManager]::new($replicaPath, $this.logger)
+        $validator = [FileValidator]::new($sourcePath, $replicaPath, $checkpointManager, $this.logger)
         $this.Synchronizer = [FileSynchronizer]::new(
             $sourcePath,
             $replicaPath,
-            $logger,
+            $this.logger,
             $checkpointManager,
             $validator
         )
@@ -200,71 +237,177 @@ class FolderSynchronizer {
         [NotifyFilters]::FileName, 
         [NotifyFilters]::Security
 
-        Register-ObjectEvent -InputObject $this.Watcher -EventName Created -Action { $this.AddChange($EventArgs.FullPath) }
-        Register-ObjectEvent -InputObject $this.Watcher -EventName Changed -Action { $this.AddChange($EventArgs.FullPath) }
-        Register-ObjectEvent -InputObject $this.Watcher -EventName Deleted -Action { $this.ProcessDeletion($EventArgs.FullPath) }
-        Register-ObjectEvent -InputObject $this.Watcher -EventName Renamed -Action { $this.ProcessRename($EventArgs) }
+        $this.EventSubscriptions += Register-ObjectEvent -InputObject $this.Watcher -EventName Created -Action { 
+            try {
+                $Event.MessageData.Logger.Log("Attempting to sync: $($Event.SourceEventArgs.FullPath)", "FILECREATE")
+                $Event.MessageData.AddChange($Event.SourceEventArgs.FullPath) 
+            }
+            catch {
+                $Event.MessageData.Logger.Log("Error in Create event: handler: $($_.Exception.Message)", "ERROR")
+            }
+        } -MessageData $this
+
+        $this.EventSubscriptions += Register-ObjectEvent -InputObject $this.Watcher -EventName Changed -Action { 
+            try {
+                $Event.MessageData.Logger.Log("Attempting to sync: $($Event.SourceEventArgs.FullPath)", "FILEUPDATE")
+                $Event.MessageData.AddChange($Event.SourceEventArgs.FullPath) 
+            }
+            catch {
+                $Event.MessageData.Logger.Log("Error in Change event: handler: $($_.Exception.Message)", "ERROR")
+            }
+        } -MessageData $this
+
+        $this.EventSubscriptions += Register-ObjectEvent -InputObject $this.Watcher -EventName Deleted -Action { 
+            try {
+                $Event.MessageData.Logger.Log("Attempting to delete: $($Event.SourceEventArgs.FullPath)", "FILEDELETE")
+                $Event.MessageData.ProcessDeletion($Event.SourceEventArgs.FullPath) 
+            }
+            catch {
+                $Event.MessageData.Logger.Log("Error in Delete event: handler: $($_.Exception.Message)", "ERROR")
+            }
+        } -MessageData $this
+
+        $this.EventSubscriptions += Register-ObjectEvent -InputObject $this.Watcher -EventName Renamed -Action { 
+            try {
+                $Event.MessageData.Logger.Log("Attempting to rename: $($Event.SourceEventArgs.OldFullPath) -> $($Event.SourceEventArgs.FullPath)", "FILERENAME")
+                $Event.MessageData.ProcessRename($Event.SourceEventArgs) 
+            }
+            catch {
+                $Event.MessageData.Logger.Log("Error in Rename event: handler: $($_.Exception.Message)", "ERROR")
+            }
+        } -MessageData $this
+
 
         $this.Watcher.EnableRaisingEvents = $true
     }
 
     [void] SetupDebounceTimer() {
-        $this.DebounceTimer.AutoReset = $false
-        $this.DebounceTimer.Add_Elapsed({
-                $uniquePaths = $this.PendingChanges | Sort-Object -Unique
-                $this.PendingChanges.Clear()
+        try {
+            $this.DebounceTimer.AutoReset = $false
+            $this.EventSubscriptions += Register-ObjectEvent -InputObject $this.DebounceTimer -EventName Elapsed -Action {
+                $handler = $Event.MessageData
+                $uniquePaths = $handler.PendingChanges | Sort-Object -Unique
+                $handler.PendingChanges.Clear()
                 foreach ($path in $uniquePaths) {
-                    $this.Synchronizer.SyncFile($path)
+                    $handler.Synchronizer.SyncFile($path)
                 }
-                $this.Synchronizer.CheckpointManager.SaveCheckpoint()
-            })
+                $handler.Synchronizer.CheckpointManager.SaveCheckpoint()
+            } -MessageData $this
+        }
+        catch {
+            [Utilities]::HandleError("SetupDebounceTimer", "Debounce timer", $_, $this.Logger, $true)
+        }
     }
 
     [void] AddChange([string]$fullPath) {
-        $this.PendingChanges.Add($fullPath)
-        $this.DebounceTimer.Stop()
-        $this.DebounceTimer.Start()
+        try {
+            $this.Logger.Log("Adding to pending changes: $fullPath", "PENDING")
+            $this.PendingChanges.Add($fullPath)
+            $this.Logger.Log("Debouncing changes", "DEBOUNCE")
+            $this.DebounceTimer.Stop()
+            $this.DebounceTimer.Start()
+        }
+        catch {
+            [Utilities]::HandleError("AddChange", $fullPath, $_, $this.Logger, $true)
+        }
     }
 
     [void] ProcessDeletion([string]$fullPath) {
-        $relativePath = [Path]::GetRelativePath($this.Synchronizer.SourceRoot, $fullPath)
-        $replicaPath = Join-Path $this.Synchronizer.ReplicaRoot $relativePath
-        $this.Synchronizer.DeleteOrphan($replicaPath)
+        try {
+            $relativePath = [Path]::GetRelativePath($this.Synchronizer.SourceRoot, $fullPath)
+            $replicaPath = Join-Path $this.Synchronizer.ReplicaRoot $relativePath
+            $this.Logger.Log("Processing deletion: $relativePath", "FILEDELETE")
+            $this.Synchronizer.DeleteOrphan($replicaPath)
+        }
+        catch {
+            [Utilities]::HandleError("ProcessDeletion", $fullPath, $_, $this.Logger, $true)
+        }
     }
 
     [void] ProcessRename([System.IO.RenamedEventArgs]$e) {
-        $oldRelative = [Path]::GetRelativePath($this.Synchronizer.SourceRoot, $e.OldFullPath)
-        $newRelative = [Path]::GetRelativePath($this.Synchronizer.SourceRoot, $e.FullPath)
-        $this.ProcessDeletion($e.OldFullPath)
-        $this.AddChange($e.FullPath)
+        try {
+            $this.Logger.Log("Processing rename: $($e.OldFullPath) -> $($e.FullPath)", "FILERENAME")
+            $this.ProcessDeletion($e.OldFullPath)
+            $this.Logger.Log("Attempting to sync: $($e.FullPath)", "FILECREATE")
+            $this.AddChange($e.FullPath)
+        }
+        catch {
+            [Utilities]::HandleError("ProcessRename", $e.FullPath, $_, $this.Logger, $true)
+        }
     }
 
 
     [void] FullSync() {
-        Get-ChildItem -Path $this.Synchronizer.SourceRoot -Recurse -File | ForEach-Object {
-            $this.Synchronizer.SyncFile($_.FullName)
+        try {
+            Get-ChildItem -Path $this.Synchronizer.SourceRoot -Recurse -File | ForEach-Object {
+                $this.Logger.Log("Attempting to sync: $($_.FullName)", "FILECREATE")
+                $this.Synchronizer.SyncFile($_.FullName)
+            }
+            $this.Synchronizer.CheckpointManager.SaveCheckpoint()
         }
-        $this.Synchronizer.CheckpointManager.SaveCheckpoint()
+        catch {
+            [Utilities]::HandleError("FullSync", $this.Synchronizer.SourceRoot, $_, $this.Logger, $true)
+        }
     }
 
     [void] CleanupReplica() {
-        Get-ChildItem -Path $this.Synchronizer.ReplicaRoot -Recurse -File | ForEach-Object {
-            $relativePath = [Path]::GetRelativePath($this.Synchronizer.ReplicaRoot, $_.FullName)
-            $sourcePath = Join-Path $this.Synchronizer.SourceRoot $relativePath
-            if (-not (Test-Path $sourcePath)) {
-                $this.Synchronizer.DeleteOrphan($_.FullName)
+        try {
+            Get-ChildItem -Path $this.Synchronizer.ReplicaRoot -Recurse -File | ForEach-Object {
+                $relativePath = [Path]::GetRelativePath($this.Synchronizer.ReplicaRoot, $_.FullName)
+                $sourcePath = Join-Path $this.Synchronizer.SourceRoot $relativePath
+                if (-not (Test-Path $sourcePath) -and -not $sourcePath.EndsWith(".synchashes")) {
+                    $this.Logger.Log("Orphan detected: $relativePath", "FILEDELETE")
+                    $this.Synchronizer.DeleteOrphan($_.FullName)
+                }
             }
+        }
+        catch {
+            [Utilities]::HandleError("CleanupReplica", $this.Synchronizer.ReplicaRoot, $_, $this.Logger, $true)
         }
     }
 }
 
-$synchronizer = [FolderSynchronizer]::new($SourceFolder, $ReplicaFolder, $LogPath)
-$synchronizer.FullSync()
-$synchronizer.CleanupReplica()
+$logger = [Logger]::new($LogPath)
+$logger.Log("Starting MiniOneDrive", "INFO")
 
 try {
-    while ($true) { Start-Sleep -Seconds 60 }
+    $synchronizer = [FolderSynchronizer]::new($SourceFolder, $ReplicaFolder, $LogPath)
+    $synchronizer.FullSync()
+    $synchronizer.CleanupReplica()
+    
+    try {
+        while ($true) { Start-Sleep -Seconds 1 }
+    }
+    finally {
+        if ($synchronizer -and $synchronizer.Synchronizer -and $synchronizer.Synchronizer.CheckpointManager) {
+            $synchronizer.Synchronizer.CheckpointManager.SaveCheckpoint()
+        }
+            
+        switch ($synchronizer) {
+            { $_ -and $_.EventSubscriptions } {
+                foreach ($subscription in $_.EventSubscriptions) {
+                    $logger.Log("Unregistering event: $($subscription.Name)", "INFO")
+                    Unregister-Event -SubscriptionId $subscription.Id -Force -ErrorAction SilentlyContinue
+                    $logger.Log("Event unregistered: $($subscription.Name)", "INFO")
+                }
+            }
+            { $_ -and $_.Watcher } {
+                $logger.Log("Disabling watcher", "INFO")
+                $_.Watcher.EnableRaisingEvents = $false
+                $_.Watcher.Dispose()
+                $logger.Log("Watcher and subscriptions disposed", "INFO")
+            }
+            { $_ -and $_.DebounceTimer } {
+                $logger.Log("Stopping debounce timer", "INFO")
+                $_.DebounceTimer.Stop()
+                $_.DebounceTimer.Dispose()
+                $logger.Log("Debounce timer disposed", "INFO")
+            }
+        }
+    } 
 }
-finally {
-    $synchronizer.Synchronizer.CheckpointManager.SaveCheckpoint()
+catch {
+    $logger.Log("Critical error in main synchronization process: $($_.Exception.Message)", "CRITICAL")
+    $logger.Log("$($_ | Format-List -Force | Out-String)", "DEBUG")
+    throw
 }
