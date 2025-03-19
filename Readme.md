@@ -62,7 +62,7 @@ cd MiniOneDrive
 Execute the script with your desired parameters. Example:
 
 ```sh
-.\MiniOneDrive.ps1 -SourceFolder "D:\Files1" -ReplicaFolder "D:\FilesReplica" -LogPath "C:\Logs\MiniOneDrive.log"
+.\MiniOneDrive.ps1 -SourceFolder "C:\Files1" -ReplicaFolder "C:\FilesReplica" -LogPath "C:\Logs\MiniOneDrive.log"
 ```
 
 This command starts the synchronization process, performing an initial full sync and then monitoring changes continuously.
